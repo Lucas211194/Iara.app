@@ -1,0 +1,62 @@
+{
+  "expo": {
+    "name": "Iara",
+    "slug": "iara-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icons/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#FFFFFF"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.iara.mobile",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Iara usa Face ID/Touch ID para proteger seus dados de saúde",
+        "NSLocalNetworkUsageDescription": "Iara precisa acessar a rede local para sincronização segura",
+        "NSCameraUsageDescription": "Iara usa câmera para escanear QR Code de convite do parceiro"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icons/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
+      },
+      "package": "app.iara.mobile",
+      "permissions": [
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/icons/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-localization",
+      "expo-secure-store",
+      ["expo-build-properties", {
+        "android": {
+          "compileSdkVersion": 34,
+          "targetSdkVersion": 34,
+          "buildToolsVersion": "34.0.0"
+        },
+        "ios": {
+          "deploymentTarget": "16.0"
+        }
+      }]
+    ],
+    "extra": {
+      "apiUrl": "http://10.0.2.2:8081/api/v1",
+      "keycloakUrl": "http://10.0.2.2:8080",
+      "enableEncryption": true
+    },
+    "owner": "iara-app"
+  }
+}
