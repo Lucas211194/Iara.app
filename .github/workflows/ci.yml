@@ -1,0 +1,48 @@
+name: CI - Backend (iara-common)
+
+on:
+  push:
+    branches:
+      - main
+      - "fix/**"
+    paths:
+      - "iara-backend/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "iara-backend/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch: {}
+
+jobs:
+  backend-build-and-test:
+    name: Build e testes - iara-common
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build e testes - mvn -pl iara-common -am clean verify
+        working-directory: iara-backend
+        env:
+          IARA_COLUMN_ENCRYPTION_KEY: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE="
+          IARA_JWT_SECRET: "ci-only-secret-key-never-use-in-production-environment-98765"
+        run: mvn -pl iara-common -am clean verify --batch-mode --show-version
+
+      - name: Publicar relatorio de testes (se houver falha)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: iara-backend/iara-common/target/surefire-reports/
+          retention-days: 7
