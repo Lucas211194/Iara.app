@@ -1,0 +1,12 @@
+# Configuracao usada apenas durante execucao de testes automatizados do
+# modulo iara-common. NUNCA usar estes valores em ambiente real (dev, staging
+# ou producao) — sao chaves de exemplo, sem qualquer relacao com segredos
+# reais do projeto.
+iara:
+  crypto:
+    column-encryption-key: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=" # 32 bytes base64 (uso exclusivo de teste)
+  jwt:
+    secret: "test-only-secret-key-never-use-in-production-environment-12345"
+    issuer: iara-auth-test
+    access-token-validity-ms: 900000
+    refresh-token-validity-ms: 2592000000
