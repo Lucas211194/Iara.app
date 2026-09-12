@@ -1,125 +1,138 @@
 package com.iara.common.crypto;
 
-import jakarta.persistence.AttributeConverter;
-import jakarta.persistence.Converter;
-import lombok.extern.slf4j.Slf4j;
+import com.iara.common.exception.EncryptionException;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import javax.crypto.Cipher;
-import javax.crypto.KeyGenerator;
-import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Base64;
 
 /**
- * Criptografia em nível de coluna (Column-Level Encryption) usando AES-GCM.
- * 
- * REGRAS DE PRIVACIDADE IARA:
- * - Campos sensíveis (saúde reprodutiva, peso, anotações) SEMPRE criptografados em coluna
- * - Chave mestra derivada de HSM/KMS em produção; aqui usa chave derivada de config
- * - Nonce único por criptografia (GCM) - nunca reutiliza nonce
- * - Tag de autenticação GCM integrada no payload criptografado
+ * Criptografia em nivel de coluna (Column-Level Encryption) usando AES-GCM
+ * (AEAD: confidencialidade + integridade + autenticidade em uma unica
+ * operacao).
+ *
+ * Formato armazenado (Base64 de um unico blob binario):
+ *   [ IV (12 bytes) ][ ciphertext ][ auth tag GCM (16 bytes, anexado pelo JDK) ]
+ *
+ * Requisitos de seguranca implementados:
+ * - A chave NUNCA fica hardcoded no codigo-fonte. E lida exclusivamente da
+ *   variavel de ambiente IARA_COLUMN_ENCRYPTION_KEY (ver application.yml:
+ *   iara.crypto.column-encryption-key: ${IARA_COLUMN_ENCRYPTION_KEY}).
+ * - A chave deve ser uma string Base64 de exatamente 32 bytes decodificados
+ *   (AES-256). Chave de tamanho invalido falha no boot da aplicacao
+ *   (fail-fast), nunca silenciosamente com uma chave fraca.
+ * - Um IV (nonce) aleatorio de 96 bits e gerado a cada chamada de encrypt().
+ *   GCM exige que o par (chave, IV) nunca se repita; reutilizar IV com a
+ *   mesma chave quebra a confidencialidade. SecureRandom garante
+ *   imprevisibilidade criptografica.
+ * - A tag de autenticacao GCM (128 bits) detecta qualquer adulteracao do
+ *   ciphertext armazenado; decrypt() falha com EncryptionException se o
+ *   dado foi corrompido/adulterado, em vez de retornar lixo silenciosamente.
  */
 @Component
-@Slf4j
-public class ColumnEncryptor {
+public class ColumnEncryptor implements InitializingBean {
 
-    private static final String ALGORITHM = "AES/GCM/NoPadding";
-    private static final int GCM_IV_LENGTH = 12;  // 96 bits para GCM
-    private static final int GCM_TAG_LENGTH = 16; // 128 bits
-    private static final int KEY_SIZE = 256;
+    private static final String CIPHER_ALGORITHM = "AES/GCM/NoPadding";
+    private static final String KEY_ALGORITHM = "AES";
+    private static final int GCM_IV_LENGTH_BYTES = 12;
+    private static final int GCM_TAG_LENGTH_BITS = 128;
+    private static final int REQUIRED_KEY_LENGTH_BYTES = 32;
 
-    private final SecretKey masterKey;
+    private final String rawBase64Key;
+    private final SecureRandom secureRandom = new SecureRandom();
+    private SecretKeySpec secretKey;
 
-    public ColumnEncryptor(@Value("${iara.crypto.column-encryption-key}") String base64Key) {
-        byte[] decoded = Base64.getDecoder().decode(base64Key);
-        this.masterKey = new SecretKeySpec(decoded, 0, decoded.length, "AES");
+    public ColumnEncryptor(@Value("${iara.crypto.column-encryption-key:}") String base64Key) {
+        this.rawBase64Key = base64Key;
     }
 
-    /**
-     * Criptografa valor sensível para armazenamento em coluna.
-     * Formato armazenado: [IV (12 bytes)][Ciphertext][AuthTag (16 bytes)] em Base64
-     */
-    public String encrypt(String plaintext) {
-        if (plaintext == null || plaintext.isBlank()) {
-            return plaintext;
+    @Override
+    public void afterPropertiesSet() {
+        if (!StringUtils.hasText(rawBase64Key)) {
+            throw new IllegalStateException(
+                "Variavel de ambiente IARA_COLUMN_ENCRYPTION_KEY nao definida. " +
+                "Gere uma chave AES-256 com: openssl rand -base64 32");
         }
+        byte[] decoded;
         try {
-            byte[] iv = new byte[GCM_IV_LENGTH];
-            new SecureRandom().nextBytes(iv);
+            decoded = Base64.getDecoder().decode(rawBase64Key);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "IARA_COLUMN_ENCRYPTION_KEY nao e um Base64 valido.", e);
+        }
+        if (decoded.length != REQUIRED_KEY_LENGTH_BYTES) {
+            throw new IllegalStateException(
+                "IARA_COLUMN_ENCRYPTION_KEY deve decodificar para exatamente " +
+                REQUIRED_KEY_LENGTH_BYTES + " bytes (AES-256). Tamanho atual: " +
+                decoded.length + " bytes.");
+        }
+        this.secretKey = new SecretKeySpec(decoded, KEY_ALGORITHM);
+    }
 
-            Cipher cipher = Cipher.getInstance(ALGORITHM);
-            GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH * 8, iv);
-            cipher.init(Cipher.ENCRYPT_MODE, masterKey, spec);
+    public String encrypt(String plaintext) {
+        if (plaintext == null) {
+            return null;
+        }
+        requireInitialized();
+        try {
+            byte[] iv = new byte[GCM_IV_LENGTH_BYTES];
+            secureRandom.nextBytes(iv);
 
-            byte[] plaintextBytes = plaintext.getBytes(StandardCharsets.UTF_8);
-            byte[] ciphertext = cipher.doFinal(plaintextBytes);
+            Cipher cipher = Cipher.getInstance(CIPHER_ALGORITHM);
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey, new GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv));
 
-            // Combine IV + Ciphertext + AuthTag (GCM appends tag automatically)
+            byte[] ciphertext = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
+
             ByteBuffer buffer = ByteBuffer.allocate(iv.length + ciphertext.length);
-            buffer.put(iv);
-            buffer.put(ciphertext);
+            buffer.put(iv).put(ciphertext);
 
             return Base64.getEncoder().encodeToString(buffer.array());
-        } catch (Exception e) {
-            log.error("Falha na criptografia de coluna", e);
-            throw new ColumnEncryptionException("Falha ao criptografar dado sensível", e);
+        } catch (GeneralSecurityException e) {
+            throw new EncryptionException("Falha ao criptografar dado de coluna.", e);
         }
     }
 
-    /**
-     * Descriptografa valor da coluna.
-     */
-    public String decrypt(String encrypted) {
-        if (encrypted == null || encrypted.isBlank()) {
-            return encrypted;
+    public String decrypt(String encryptedBase64) {
+        if (encryptedBase64 == null) {
+            return null;
         }
+        requireInitialized();
         try {
-            byte[] decoded = Base64.getDecoder().decode(encrypted);
+            byte[] decoded = Base64.getDecoder().decode(encryptedBase64);
+            if (decoded.length < GCM_IV_LENGTH_BYTES) {
+                throw new EncryptionException("Payload cifrado menor que o IV minimo esperado.");
+            }
+
             ByteBuffer buffer = ByteBuffer.wrap(decoded);
-
-            byte[] iv = new byte[GCM_IV_LENGTH];
+            byte[] iv = new byte[GCM_IV_LENGTH_BYTES];
             buffer.get(iv);
-
             byte[] ciphertext = new byte[buffer.remaining()];
             buffer.get(ciphertext);
 
-            Cipher cipher = Cipher.getInstance(ALGORITHM);
-            GCMParameterSpec spec = new GCMParameterSpec(GCM_TAG_LENGTH * 8, iv);
-            cipher.init(Cipher.DECRYPT_MODE, masterKey, spec);
+            Cipher cipher = Cipher.getInstance(CIPHER_ALGORITHM);
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, new GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv));
 
             byte[] plaintext = cipher.doFinal(ciphertext);
             return new String(plaintext, StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            log.error("Falha na descriptografia de coluna - dado pode estar corrompido ou chave incorreta", e);
-            throw new ColumnEncryptionException("Falha ao descriptografar dado sensível", e);
+        } catch (EncryptionException e) {
+            throw e;
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            throw new EncryptionException("Falha ao decriptografar dado de coluna: payload invalido ou corrompido.", e);
         }
     }
 
-    /**
-     * Converter JPA para uso transparente em entidades.
-     */
-    @Converter
-    public static class EncryptedStringConverter implements AttributeConverter<String, String> {
-        private final ColumnEncryptor encryptor;
-
-        public EncryptedStringConverter(ColumnEncryptor encryptor) {
-            this.encryptor = encryptor;
-        }
-
-        @Override
-        public String convertToDatabaseColumn(String plaintext) {
-            return encryptor.encrypt(plaintext);
-        }
-
-        @Override
-        public String convertToEntityAttribute(String encrypted) {
-            return encryptor.decrypt(encrypted);
+    private void requireInitialized() {
+        if (secretKey == null) {
+            throw new IllegalStateException("ColumnEncryptor nao foi inicializado corretamente.");
         }
     }
 }
